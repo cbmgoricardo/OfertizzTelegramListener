@@ -11,22 +11,18 @@ const sessionString = process.env.TELEGRAM_SESSION;
 const supabaseFunctionUrl = process.env.SUPABASE_INGEST_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
+// Tratamento da lista de canais
 const RAW_CHANNELS = process.env.TARGET_CHANNELS ? process.env.TARGET_CHANNELS.split(',') : [];
 const TARGET_CHANNELS = RAW_CHANNELS.map(c => c.trim()).filter(c => c.length > 0);
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('Ofertizz Listener Active 🎧');
-});
+// Server Healthcheck
+const server = http.createServer((req, res) => { res.writeHead(200); res.end('Ofertizz Debugger Active 🕵️'); });
 server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${process.env.PORT || 3000}`));
 
 (async () => {
-  console.log("🚀 Iniciando Ofertizz Listener v3.0 (Global Watch)...");
+  console.log("🕵️ Iniciando Modo Sherlock Holmes (Debug Total)...");
 
-  if (!sessionString) {
-      console.error("❌ CRÍTICO: TELEGRAM_SESSION não encontrada.");
-      process.exit(1);
-  }
+  if (!sessionString) { console.error("❌ Sem Session String"); process.exit(1); }
 
   const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
     connectionRetries: 5,
@@ -34,61 +30,68 @@ server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${p
   });
 
   await client.start({ onError: (err) => console.log("Erro conexão:", err) });
-  console.log("✅ Cliente conectado!");
+  console.log("✅ Conectado!");
 
-  // --- MAPEAR IDs ---
-  // Vamos criar um mapa de IDs -> Nomes para verificação rápida
-  const monitoredIds = new Set();
+  // --- 1. PROVA DE VIDA ---
+  try {
+      await client.sendMessage("me", { message: "🤖 Ofertizz Bot Iniciado! Estou online." });
+      console.log("📨 Mensagem de teste enviada para 'Mensagens Salvas'. Verifique seu Telegram!");
+  } catch (e) {
+      console.error("❌ Falha ao enviar mensagem de teste:", e);
+  }
+
+  // --- 2. RESOLUÇÃO DE CANAIS ---
+  // Vamos criar um mapa de IDs para verificar, mas NÃO vamos filtrar no Listener ainda
+  const watchList = new Set();
   
-  console.log(`🔎 Resolvendo ${TARGET_CHANNELS.length} canais...`);
+  console.log(`🔎 IDs esperados para os canais configurados:`);
   for (const channel of TARGET_CHANNELS) {
       try {
           const entity = await client.getEntity(channel);
-          // O ID pode vir como BigInt, convertemos para String para comparar
-          monitoredIds.add(entity.id.toString());
-          // Alguns canais tem ID negativo no formato -100..., vamos garantir
-          monitoredIds.add(`-100${entity.id.toString()}`); 
-          console.log(`   ✅ Monitorando: ${channel} (ID: ${entity.id})`);
+          watchList.add(entity.id.toString());
+          console.log(`   🎯 ${channel} -> ID Puro: ${entity.id.toString()} | ID Channel: -100${entity.id.toString()}`);
       } catch (error) {
-          console.error(`   ❌ Falha ao encontrar canal: ${channel}`);
+          console.error(`   ❌ Não encontrei: ${channel}`);
       }
   }
 
-  console.log(`🎧 Escutando TUDO e filtrando pelos IDs mapeados...`);
+  console.log("👂 Ouvindo TUDO (DMs, Grupos, Canais)... Prepare-se para os logs!");
 
-  // --- EVENTO GLOBAL (Sem filtro de chats no construtor) ---
+  // --- 3. LISTENER SEM FILTRO (PEGA TUDO) ---
   client.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message || !message.chatId) return;
+    if (!message) return;
 
-    // Verifica se o ID do chat está na nossa lista de monitorados
-    // O chatID vem como BigInt, precisa converter para string
-    const msgChatId = message.chatId.toString();
+    // Dados da mensagem
+    const text = message.text || message.caption || "";
+    const chatId = message.chatId ? message.chatId.toString() : "N/A";
     
-    // Verificação flexível (com e sem o prefixo -100 de canais)
-    const isMonitored = monitoredIds.has(msgChatId) || 
-                        monitoredIds.has(msgChatId.replace('-100', '')) ||
-                        monitoredIds.has(`-100${msgChatId}`);
+    // Tenta pegar o nome do remetente/canal
+    let chatName = "Desconhecido";
+    try {
+        const chat = await message.getChat();
+        chatName = chat.title || chat.username || "Privado";
+    } catch(e) {}
 
-    if (isMonitored) {
-        const text = message.text || message.caption || "";
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
+    // LOG DE DEBUG: Mostra tudo que chega para descobrirmos o ID correto
+    console.log(`📡 [EVENTO RECEBIDO] De: ${chatName} (ID: ${chatId}) | Texto: "${text.substring(0, 20)}..."`);
+
+    // VERIFICAÇÃO SE É UM DOS NOSSOS
+    // Verifica ID puro ou com prefixo -100 (comum em canais)
+    const isTarget = watchList.has(chatId) || 
+                     watchList.has(chatId.replace('-100', ''));
+
+    if (isTarget) {
+        console.log("🔥 É UM CANAL ALVO! Processando...");
         
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
         if (urlRegex.test(text)) {
-            // Tenta pegar nome do chat
-            let chatName = "Canal Monitorado";
-            try {
-                const chat = await message.getChat();
-                chatName = chat.title || chat.username || msgChatId;
-            } catch(e) {}
-
-            console.log(`⚡ OFERTA EM [${chatName}]: ${text.substring(0, 30).replace(/\n/g, ' ')}...`);
-
             const extractedUrls = text.match(urlRegex);
             const targetUrl = extractedUrls ? extractedUrls[0] : null;
 
             if (targetUrl && supabaseFunctionUrl) {
                 try {
+                    console.log(`   🚀 Enviando oferta para Supabase: ${targetUrl}`);
                     await axios.post(supabaseFunctionUrl, {
                         url: targetUrl,
                         raw_text: text,
@@ -96,13 +99,20 @@ server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${p
                     }, {
                         headers: { 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' }
                     });
-                    console.log("   🚀 Enviado para Supabase.");
+                    console.log("   ✅ Sucesso!");
                 } catch (err) {
-                    console.error("   ❌ Erro envio Supabase:", err.message);
+                    console.error("   ❌ Erro Supabase:", err.message);
                 }
+            } else {
+                console.log("   ⚠️ Link não encontrado ou URL Supabase ausente.");
             }
+        } else {
+            console.log("   ⚠️ Mensagem sem link.");
         }
+    } else {
+        // Se não for alvo, apenas ignora (mas já logamos lá em cima que chegou)
     }
-  }, new NewMessage({ incoming: true })); // Escuta tudo que chega
+
+  }, new NewMessage({ incoming: true }));
 
 })();
