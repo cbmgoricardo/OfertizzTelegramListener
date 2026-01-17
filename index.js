@@ -11,16 +11,20 @@ const sessionString = process.env.TELEGRAM_SESSION;
 const supabaseFunctionUrl = process.env.SUPABASE_INGEST_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
-// Tratamento da lista de canais
 const RAW_CHANNELS = process.env.TARGET_CHANNELS ? process.env.TARGET_CHANNELS.split(',') : [];
 const TARGET_CHANNELS = RAW_CHANNELS.map(c => c.trim()).filter(c => c.length > 0);
 
-// Server Healthcheck
-const server = http.createServer((req, res) => { res.writeHead(200); res.end('Ofertizz Debugger Active 🕵️'); });
+// Cache para evitar duplicidade no polling
+const PROCESSED_IDS = new Set();
+
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('Ofertizz Hybrid Listener Active 🎧');
+});
 server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${process.env.PORT || 3000}`));
 
 (async () => {
-  console.log("🕵️ Iniciando Modo Sherlock Holmes (Debug Total)...");
+  console.log("🚀 Iniciando Ofertizz Listener HÍBRIDO (Event + Polling)...");
 
   if (!sessionString) { console.error("❌ Sem Session String"); process.exit(1); }
 
@@ -32,87 +36,91 @@ server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${p
   await client.start({ onError: (err) => console.log("Erro conexão:", err) });
   console.log("✅ Conectado!");
 
-  // --- 1. PROVA DE VIDA ---
-  try {
-      await client.sendMessage("me", { message: "🤖 Ofertizz Bot Iniciado! Estou online." });
-      console.log("📨 Mensagem de teste enviada para 'Mensagens Salvas'. Verifique seu Telegram!");
-  } catch (e) {
-      console.error("❌ Falha ao enviar mensagem de teste:", e);
-  }
-
-  // --- 2. RESOLUÇÃO DE CANAIS ---
-  // Vamos criar um mapa de IDs para verificar, mas NÃO vamos filtrar no Listener ainda
-  const watchList = new Set();
+  // --- 1. RESOLVER E MAPEAR ENTIDADES ---
+  const channelEntities = [];
   
-  console.log(`🔎 IDs esperados para os canais configurados:`);
+  console.log(`🔎 Resolvendo canais para monitoramento...`);
   for (const channel of TARGET_CHANNELS) {
       try {
           const entity = await client.getEntity(channel);
-          watchList.add(entity.id.toString());
-          console.log(`   🎯 ${channel} -> ID Puro: ${entity.id.toString()} | ID Channel: -100${entity.id.toString()}`);
+          channelEntities.push(entity);
+          console.log(`   ✅ Alvo confirmado: ${channel} (ID: ${entity.id})`);
       } catch (error) {
-          console.error(`   ❌ Não encontrei: ${channel}`);
+          console.error(`   ❌ Erro ao resolver: ${channel}`, error.message);
       }
   }
 
-  console.log("👂 Ouvindo TUDO (DMs, Grupos, Canais)... Prepare-se para os logs!");
+  // --- FUNÇÃO DE PROCESSAMENTO CENTRALIZADA ---
+  async function processMessage(message) {
+      if (!message || !message.id) return;
+      
+      // Evita processar a mesma mensagem duas vezes (Event + Polling)
+      const uniqueId = `${message.chatId}_${message.id}`;
+      if (PROCESSED_IDS.has(uniqueId)) return;
+      PROCESSED_IDS.add(uniqueId);
+      
+      // Limpa cache antigo para não estourar memória
+      if (PROCESSED_IDS.size > 5000) {
+          const it = PROCESSED_IDS.values();
+          for(let i=0; i<1000; i++) PROCESSED_IDS.delete(it.next().value);
+      }
 
-  // --- 3. LISTENER SEM FILTRO (PEGA TUDO) ---
+      const text = message.text || message.caption || "";
+      const urlRegex = /(https?:\/\/[^\s]+)/g;
+
+      if (urlRegex.test(text)) {
+          console.log(`⚡ OFERTA DETECTADA: "${text.substring(0, 30)}..."`);
+          
+          if (supabaseFunctionUrl) {
+              const extractedUrls = text.match(urlRegex);
+              const targetUrl = extractedUrls ? extractedUrls[0] : null;
+              
+              // Tenta pegar nome do chat
+              let chatName = "Canal Monitorado";
+              try {
+                  const chat = await message.getChat();
+                  chatName = chat.title || chat.username;
+              } catch(e){}
+
+              try {
+                  await axios.post(supabaseFunctionUrl, {
+                      url: targetUrl,
+                      raw_text: text,
+                      source_channel: chatName
+                  }, {
+                      headers: { 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' }
+                  });
+                  console.log("   🚀 Enviado para Supabase!");
+              } catch (err) {
+                  console.error("   ❌ Erro envio:", err.message);
+              }
+          }
+      }
+  }
+
+  // --- ESTRATÉGIA A: EVENTO EM TEMPO REAL ---
   client.addEventHandler(async (event) => {
-    const message = event.message;
-    if (!message) return;
-
-    // Dados da mensagem
-    const text = message.text || message.caption || "";
-    const chatId = message.chatId ? message.chatId.toString() : "N/A";
-    
-    // Tenta pegar o nome do remetente/canal
-    let chatName = "Desconhecido";
-    try {
-        const chat = await message.getChat();
-        chatName = chat.title || chat.username || "Privado";
-    } catch(e) {}
-
-    // LOG DE DEBUG: Mostra tudo que chega para descobrirmos o ID correto
-    console.log(`📡 [EVENTO RECEBIDO] De: ${chatName} (ID: ${chatId}) | Texto: "${text.substring(0, 20)}..."`);
-
-    // VERIFICAÇÃO SE É UM DOS NOSSOS
-    // Verifica ID puro ou com prefixo -100 (comum em canais)
-    const isTarget = watchList.has(chatId) || 
-                     watchList.has(chatId.replace('-100', ''));
-
-    if (isTarget) {
-        console.log("🔥 É UM CANAL ALVO! Processando...");
-        
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
-        if (urlRegex.test(text)) {
-            const extractedUrls = text.match(urlRegex);
-            const targetUrl = extractedUrls ? extractedUrls[0] : null;
-
-            if (targetUrl && supabaseFunctionUrl) {
-                try {
-                    console.log(`   🚀 Enviando oferta para Supabase: ${targetUrl}`);
-                    await axios.post(supabaseFunctionUrl, {
-                        url: targetUrl,
-                        raw_text: text,
-                        source_channel: chatName
-                    }, {
-                        headers: { 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' }
-                    });
-                    console.log("   ✅ Sucesso!");
-                } catch (err) {
-                    console.error("   ❌ Erro Supabase:", err.message);
-                }
-            } else {
-                console.log("   ⚠️ Link não encontrado ou URL Supabase ausente.");
-            }
-        } else {
-            console.log("   ⚠️ Mensagem sem link.");
-        }
-    } else {
-        // Se não for alvo, apenas ignora (mas já logamos lá em cima que chegou)
-    }
-
+      // Filtra apenas se vier dos canais monitorados
+      if (event.message && channelEntities.some(e => e.id.toString() === event.message.chatId?.toString())) {
+          await processMessage(event.message);
+      }
   }, new NewMessage({ incoming: true }));
+
+  // --- ESTRATÉGIA B: POLLING ATIVO (BACKUP) ---
+  console.log("🔄 Iniciando Polling de Backup (a cada 30s)...");
+  
+  setInterval(async () => {
+      for (const entity of channelEntities) {
+          try {
+              // Pega as últimas 3 mensagens do canal
+              const messages = await client.getMessages(entity, { limit: 3 });
+              for (const msg of messages) {
+                  await processMessage(msg);
+              }
+          } catch (e) {
+              console.error(`Erro no polling de ${entity.id}:`, e.message);
+          }
+      }
+  }, 30000); // Roda a cada 30 segundos
 
 })();
