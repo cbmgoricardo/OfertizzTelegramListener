@@ -82,11 +82,36 @@ server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${p
                   chatName = chat.title || chat.username;
               } catch(e){}
 
+              // [NOVO] Extração de Imagem do Preview (WebPage)
+              let imageUrl = null;
+              if (message.media && message.media.webpage && message.media.webpage.photo) {
+                  // Tenta pegar a URL da foto do preview se disponível (API Telegram retorna objetos complexos aqui)
+                  // Nota: Extrair URL direta de media Telegram requer download/upload. 
+                  // Mas se for WebPage, às vezes temos a url original.
+                  if (message.media.webpage.url && (message.media.webpage.type === 'photo' || message.media.webpage.siteName)) {
+                       // Em muitos casos o webPage.url é o link da oferta, não da imagem.
+                       // A URL da imagem direta nem sempre vem limpa no objeto raw.
+                       // Focaremos em enviar o link para o backend fazer o trabalho pesado, 
+                       // mas se houver um campo explícito de imagem externa, pegamos.
+                  }
+              }
+
+              // Como extrair URL de imagem do Telegram Client é complexo (requer download), 
+              // vamos confiar que o backend fará o scraping. 
+              // PORÉM, se você quiser enviar uma imagem JÁ HOSPEDADA, precisaria baixar e subir.
+              // Para manter a leveza do Listener, vamos enviar apenas os dados de texto.
+              
+              // SE o link já for uma imagem direta (jpg/png), mandamos como image_url
+              if (targetUrl.match(/\.(jpeg|jpg|gif|png)$/) != null) {
+                  imageUrl = targetUrl;
+              }
+
               try {
                   await axios.post(supabaseFunctionUrl, {
                       url: targetUrl,
                       raw_text: text,
-                      source_channel: chatName
+                      source_channel: chatName,
+                      image_url: imageUrl // Envia se detectou link direto de imagem
                   }, {
                       headers: { 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' }
                   });
@@ -121,6 +146,5 @@ server.listen(process.env.PORT || 3000, () => console.log(`Healthcheck port: ${p
               console.error(`Erro no polling de ${entity.id}:`, e.message);
           }
       }
-  }, 30000); // Roda a cada 30 segundos
-
+  }, 30000); // Roda a cada 30s
 })();
